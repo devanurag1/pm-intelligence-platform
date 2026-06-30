@@ -1,3 +1,4 @@
+from fpdf import FPDF
 import json
 import os
 from datetime import datetime
@@ -396,3 +397,123 @@ def generate_report(run_id: int):
         f.write(rendered)
 
     return {"message": "Report generated", "filename": filename, "preview": rendered[:500]}
+
+@app.get("/reports/{run_id}/pdf")
+def generate_pdf_report(run_id: int):
+    conn = psycopg2.connect(db_url)
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT c.name, c.url FROM companies c
+        JOIN research_runs r ON r.company_id = c.id
+        WHERE r.id = %s
+    """, (run_id,))
+    company_row = cur.fetchone()
+    if not company_row:
+        cur.close()
+        conn.close()
+        return {"error": "Run not found"}
+
+    company_name, company_url = company_row
+
+    cur.execute(
+        "SELECT framework_name, output_json FROM framework_outputs WHERE run_id = %s",
+        (run_id,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    data = {name: output for name, output in rows}
+    if "extraction" not in data or "swot" not in data or "synthesis" not in data:
+        return {"error": "Missing data. Run extraction, swot, and synthesize first."}
+
+    extraction = data["extraction"]
+    swot = data["swot"]
+    synthesis = data["synthesis"]
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    def heading(text, size=16):
+        pdf.set_font("Helvetica", "B", size)
+        pdf.multi_cell(0, 10, text)
+        pdf.ln(2)
+
+    def subheading(text):
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.multi_cell(0, 8, text)
+
+    def body(text):
+        pdf.set_font("Helvetica", "", 11)
+        pdf.multi_cell(0, 7, text)
+
+    def bullet(text):
+        pdf.set_font("Helvetica", "", 11)
+        pdf.multi_cell(0, 7, f"- {text}")
+
+    # Title
+    heading(f"Product Analysis Report: {company_name}", 18)
+    body(f"Website: {company_url}")
+    body(f"Generated: {datetime.now().strftime('%Y-%m-%d')}")
+    pdf.ln(5)
+
+    # Overview
+    heading("1. Company Overview")
+    body(extraction.get("company_description", ""))
+    bullet(f"Business Model: {extraction.get('business_model', '')}")
+    bullet(f"Target Users: {extraction.get('target_users', '')}")
+    bullet(f"Pricing: {extraction.get('pricing_info', '')}")
+    bullet(f"Mission: {extraction.get('stated_mission', '')}")
+    pdf.ln(3)
+    subheading("Key Features")
+    for f in extraction.get("key_features", []):
+        bullet(f)
+    pdf.ln(5)
+
+    # SWOT
+    heading("2. SWOT Analysis")
+    for category in ["strengths", "weaknesses", "opportunities", "threats"]:
+        subheading(category.capitalize())
+        for item in swot.get(category, []):
+            bullet(item)
+        pdf.ln(2)
+
+    # Feature Ideas
+    heading("3. Recommended Feature Ideas")
+    for item in synthesis.get("feature_ideas", []):
+        subheading(item.get("idea", ""))
+        body(item.get("reasoning", ""))
+        pdf.ln(1)
+
+    # Metrics
+    heading("4. Metrics to Track")
+    for item in synthesis.get("metrics_to_track", []):
+        bullet(f"{item.get('metric', '')} -- {item.get('reasoning', '')}")
+
+    # Experiments
+    heading("5. Suggested Experiments")
+    for item in synthesis.get("experiments", []):
+        subheading(item.get("experiment", ""))
+        body(f"Hypothesis: {item.get('hypothesis', '')}")
+        pdf.ln(1)
+
+    # Roadmap
+    heading("6. Roadmap")
+    roadmap = synthesis.get("roadmap", {})
+    for phase in ["now", "next", "later"]:
+        subheading(phase.capitalize())
+        for item in roadmap.get(phase, []):
+            bullet(item)
+        pdf.ln(2)
+
+    # Interview Questions
+    heading("7. PM Interview Questions to Practice")
+    for i, q in enumerate(synthesis.get("interview_questions", []), 1):
+        body(f"{i}. {q}")
+
+    pdf_filename = f"report_run_{run_id}.pdf"
+    pdf.output(pdf_filename)
+
+    return {"message": "PDF generated", "filename": pdf_filename}
